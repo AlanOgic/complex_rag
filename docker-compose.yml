@@ -1,0 +1,263 @@
+services:
+  # Main RAG application
+  rag-api:
+    build: .
+    container_name: complex-rag-api
+    ports:
+      - "8000:8000"  # API port
+      - "9099:9090"  # Metrics port (external:internal)
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./config:/app/config
+      - ./cache:/app/cache
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - SQL_DB_HOST=postgres
+      - SQL_DB_PORT=5432
+      - SQL_DB_USER=postgres
+      - SQL_DB_PASSWORD=postgres_password
+      - SQL_DB_NAME=complex_rag
+      - EMBEDDING_CACHE_DIR=/app/cache/embeddings
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio_user
+      - MINIO_SECRET_KEY=minio_password
+      - MINIO_USE_SSL=false
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-sentence_transformers}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-en-v1.5}
+    depends_on:
+      - qdrant
+      - postgres
+      - minio
+    networks:
+      - rag-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Vector database (Qdrant)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: complex-rag-qdrant
+    ports:
+      - "6333:6333"  # HTTP API
+      - "6334:6334"  # gRPC API
+    volumes:
+      - qdrant-data:/qdrant/storage
+    environment:
+      - QDRANT_ALLOW_CORS=true
+      - QDRANT_TELEMETRY_DISABLED=true
+    networks:
+      - rag-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readiness"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Relational database (PostgreSQL)
+  postgres:
+    image: postgres:15-alpine
+    container_name: complex-rag-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres_password
+      - POSTGRES_DB=complex_rag
+    networks:
+      - rag-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Web UI for RAG system
+  rag-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: complex-rag-ui
+    ports:
+      - "8501:8501"  # Streamlit port
+    volumes:
+      - ./ui:/app/ui
+      - ./data:/app/data
+      - document-uploads:/app/uploads
+    environment:
+      - API_URL=http://rag-api:8000
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_SERVER_ENABLE_CORS=false
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    depends_on:
+      - rag-api
+    networks:
+      - rag-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Minio for document storage
+  minio:
+    image: minio/minio:latest
+    container_name: complex-rag-minio
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Console
+    volumes:
+      - minio-data:/data
+    environment:
+      - MINIO_ROOT_USER=minio_user
+      - MINIO_ROOT_PASSWORD=minio_password
+    command: server --console-address ":9001" /data
+    networks:
+      - rag-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MinIO setup service
+  minio-setup:
+    image: minio/mc:latest
+    container_name: complex-rag-minio-setup
+    depends_on:
+      - minio
+    environment:
+      - MINIO_ROOT_USER=minio_user
+      - MINIO_ROOT_PASSWORD=minio_password
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add myminio http://minio:9000 minio_user minio_password;
+      /usr/bin/mc mb myminio/documents;
+      /usr/bin/mc mb myminio/embeddings;
+      /usr/bin/mc mb myminio/exports;
+      /usr/bin/mc mb myminio/uploads;
+      /usr/bin/mc policy set download myminio/documents;
+      /usr/bin/mc policy set download myminio/exports;
+      exit 0;
+      "
+    networks:
+      - rag-network
+
+  # Document processor service
+  document-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: complex-rag-document-processor
+    command: ["python", "-m", "src.services.document_processor"]
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - document-uploads:/app/uploads
+      - ./config:/app/config
+      - ./cache:/app/cache
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - SQL_DB_HOST=postgres
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio_user
+      - MINIO_SECRET_KEY=minio_password
+      - MINIO_USE_SSL=false
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-sentence_transformers}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-en-v1.5}
+      - PROCESSOR_POLL_INTERVAL=5
+      - PROCESSOR_BATCH_SIZE=10
+    depends_on:
+      - rag-api
+      - qdrant
+      - postgres
+      - minio
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # Optional: Search UI using ElasticVue
+  elasticvue:
+    image: cars10/elasticvue:latest
+    container_name: complex-rag-elasticvue
+    ports:
+      - "8080:8080"
+    environment:
+      - URLS=http://qdrant:6333
+    networks:
+      - rag-network
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+
+  # Optional: Monitoring with Prometheus and Grafana
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: complex-rag-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: complex-rag-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - rag-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  qdrant-data:
+    name: complex-rag-qdrant-data
+  postgres-data:
+    name: complex-rag-postgres-data
+  minio-data:
+    name: complex-rag-minio-data
+  document-uploads:
+    name: complex-rag-document-uploads
+  prometheus-data:
+    name: complex-rag-prometheus-data
+  grafana-data:
+    name: complex-rag-grafana-data

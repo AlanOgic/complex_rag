@@ -1,0 +1,79 @@
+# Git
+.git
+.gitignore
+.github
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yml
+Dockerfile.ui
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+.env
+
+# Data volumes
+data/chroma_db/
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Model cache
+models/
+
+# Logs
+logs/
+*.log
+
+# Documentation
+docs/
+README.md
+CHANGELOG.md
+LICENSE
+
+# Tests
+tests/
+test_*
+*_test.py
+
+# Large data files
+*.csv
+*.parquet
+*.json
+*.jsonl
+*.pdf
+*.zip
+*.tar
+*.gz
